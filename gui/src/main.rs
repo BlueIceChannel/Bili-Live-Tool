@@ -1,11 +1,13 @@
 use api_client::BiliClient;
 use anyhow::Result;
-use domain::{LoginState, RoomInfo, LiveRoomBrief, UserInfo, AreaParent};
-use eframe::{egui, epi};
+use domain::{LoginState, LiveRoomBrief, UserInfo, AreaParent};
+use eframe::{egui, App as EApp};
 use qrcode::QrCode;
 use tokio::runtime::Runtime;
 use image::io::Reader as ImageReader;
 use image::GenericImageView;
+use reqwest;
+use serde_json;
 
 struct BiliApp {
     client: BiliClient,
@@ -96,12 +98,12 @@ impl Default for BiliApp {
     }
 }
 
-impl epi::App for BiliApp {
+impl eframe::App for BiliApp {
     fn name(&self) -> &str {
         "Bili Live Tool"
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut epi::Frame) {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
             match self.login_state {
                 LoginState::LoggedIn => {
@@ -299,6 +301,6 @@ fn main() -> Result<()> {
         "Bili Live Tool",
         native_options,
         Box::new(|_cc| Box::new(BiliApp::default())),
-    )?
+    );
     Ok(())
 } 

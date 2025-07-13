@@ -11,4 +11,6 @@ domain = { path = "../domain" }
 tokio = { workspace = true }
 qrcode = { workspace = true }
 image = { workspace = true }
-percent-encoding = { workspace = true } 
+percent-encoding = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true } 
