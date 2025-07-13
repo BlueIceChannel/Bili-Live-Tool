@@ -1,13 +1,12 @@
 use api_client::BiliClient;
 use anyhow::Result;
 use domain::{LoginState, LiveRoomBrief, UserInfo, AreaParent};
-use eframe::{egui, App as EApp};
+use eframe::{egui, Frame};
 use qrcode::QrCode;
 use tokio::runtime::Runtime;
 use image::io::Reader as ImageReader;
 use image::GenericImageView;
-use reqwest;
-use serde_json;
+use qrcode::Color;
 
 struct BiliApp {
     client: BiliClient,
@@ -35,8 +34,8 @@ impl BiliApp {
         let mut pixels: Vec<u8> = Vec::with_capacity(image_side * image_side * 4);
         for y in 0..image_side {
             for x in 0..image_side {
-                let black = code[(x, y)];
-                let val = if black { 0 } else { 255 };
+                let color = code[(x, y)];
+                let val = if color == Color::Dark { 0 } else { 255 };
                 pixels.extend_from_slice(&[val, val, val, 255]);
             }
         }
@@ -48,7 +47,7 @@ impl BiliApp {
     }
 
     fn bytes_to_texture(bytes: &[u8], ctx: &egui::Context) -> Option<egui::TextureHandle> {
-        if let Ok(img) = ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().and_then(|r| r.decode()) {
+        if let Ok(img) = ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().unwrap().decode() {
             let size = [img.width() as usize, img.height() as usize];
             let rgba = img.into_rgba8();
             let pixels = rgba.into_raw();
@@ -63,8 +62,9 @@ impl BiliApp {
             let bytes = resp.bytes().await.ok()?;
             Some(bytes.to_vec())
         };
-        if let Some(bytes) = rt.block_on(fut)? {
-            Self::bytes_to_texture(&bytes, ctx)
+        if let Some(bytes_vec) = rt.block_on(fut) {
+            let bytes = &bytes_vec;
+            Self::bytes_to_texture(bytes, ctx)
         } else { None }
     }
 }
@@ -99,11 +99,7 @@ impl Default for BiliApp {
 }
 
 impl eframe::App for BiliApp {
-    fn name(&self) -> &str {
-        "Bili Live Tool"
-    }
-
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
             match self.login_state {
                 LoginState::LoggedIn => {
@@ -137,7 +133,8 @@ impl eframe::App for BiliApp {
 
                     if let Some(user) = &self.user_info {
                         if let Some(av) = &self.avatar_texture {
-                            ui.image(av, av.size_vec2());
+                            let img = egui::Image::new(av.id(), av.size_vec2());
+                            ui.add(img);
                         }
                         ui.label(format!("昵称: {}", user.name));
                         if user.live_room.room_status == 0 {
@@ -152,7 +149,8 @@ impl eframe::App for BiliApp {
                             ui.label(format!("直播间号: {}", room.room_id));
                             ui.label(format!("直播状态: {}", if room.live_status == 1 { "直播中" } else { "未开播" }));
                             if let Some(cv) = &self.cover_texture {
-                                ui.image(cv, cv.size_vec2());
+                                let img = egui::Image::new(cv.id(), cv.size_vec2());
+                                ui.add(img);
                             }
                             if ui.button(if room.live_status == 1 { "停止直播" } else { "开始直播" }).clicked() {
                                 if room.live_status == 1 {
@@ -188,14 +186,14 @@ impl eframe::App for BiliApp {
                                 ui.separator();
                                 ui.label("推流地址:");
                                 ui.horizontal(|h| {
-                                    h.text_edit_singleline(&mut self.push_addr).desired_width(300.0);
+                                    h.add(egui::TextEdit::singleline(&mut self.push_addr).desired_width(300.0));
                                     if h.button("复制").clicked() {
                                         ctx.output_mut(|o| o.copied_text = self.push_addr.clone());
                                     }
                                 });
                                 ui.label("推流密钥:");
                                 ui.horizontal(|h| {
-                                    h.text_edit_singleline(&mut self.push_key).desired_width(300.0);
+                                    h.add(egui::TextEdit::singleline(&mut self.push_key).desired_width(300.0));
                                     if h.button("复制").clicked() {
                                         ctx.output_mut(|o| o.copied_text = self.push_key.clone());
                                     }
@@ -257,8 +255,7 @@ impl eframe::App for BiliApp {
                         }
                     }
                     if let Some(tex) = &self.qr_texture {
-                        let size = tex.size_vec2();
-                        ui.image(tex, size);
+                        ui.add(egui::Image::new(tex.id(), tex.size_vec2()));
                     }
                     if ui.button("检查扫码状态").clicked() {
                         if let Some(url) = &self.qr_url {
@@ -290,9 +287,8 @@ trait HttpClientAccessor {
 
 impl HttpClientAccessor for BiliClient {
     fn http_client(&self) -> &reqwest::Client {
-        &self.client
+        self.http_client()
     }
-    // we also implement client() used above
 }
 
 fn main() -> Result<()> {
