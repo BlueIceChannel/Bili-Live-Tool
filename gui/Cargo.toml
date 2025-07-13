@@ -1,0 +1,14 @@
+[package]
+name = "gui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = { version = "0.25", default-features = false, features = ["epi", "wgpu"] }
+anyhow = { workspace = true }
+api_client = { path = "../api_client" }
+domain = { path = "../domain" }
+tokio = { workspace = true }
+qrcode = { workspace = true }
+image = { workspace = true }
+percent-encoding = { workspace = true } 

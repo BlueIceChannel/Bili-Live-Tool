@@ -1,0 +1,11 @@
+[package]
+name = "cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] }
+anyhow = { workspace = true }
+api_client = { path = "../api_client" }
+domain = { path = "../domain" }
+tokio = { workspace = true } 
