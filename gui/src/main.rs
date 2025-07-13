@@ -5,8 +5,9 @@ use eframe::{egui, Frame};
 use qrcode::QrCode;
 use tokio::runtime::Runtime;
 use image::io::Reader as ImageReader;
-use image::GenericImageView;
 use qrcode::Color;
+use reqwest;
+use serde_json::Value;
 
 struct BiliApp {
     client: BiliClient,
@@ -107,7 +108,7 @@ impl eframe::App for BiliApp {
                         // 获取当前登录用户 mid
                         if let Ok(nav_json) = self.rt.block_on(async {
                             self.client
-                                .http_client()
+                                .client()
                                 .get("https://api.bilibili.com/x/web-interface/nav")
                                 .send()
                                 .await?
@@ -117,9 +118,9 @@ impl eframe::App for BiliApp {
                             let mid = nav_json["data"]["mid"].as_u64().unwrap_or(0);
                             if mid != 0 {
                                 if let Ok(info) = self.rt.block_on(self.client.get_user_info(mid)) {
-                                    self.avatar_texture = Self::fetch_texture(&self.rt, self.client.http_client(), &info.face, ctx);
+                                    self.avatar_texture = Self::fetch_texture(&self.rt, self.client.client(), &info.face, ctx);
                                     if info.live_room.room_status == 1 {
-                                        self.cover_texture = Self::fetch_texture(&self.rt, self.client.http_client(), &info.live_room.cover, ctx);
+                                        self.cover_texture = Self::fetch_texture(&self.rt, self.client.client(), &info.live_room.cover, ctx);
                                     }
                                     self.room_info = Some(info.live_room.clone());
                                     self.user_info = Some(info);
@@ -133,8 +134,7 @@ impl eframe::App for BiliApp {
 
                     if let Some(user) = &self.user_info {
                         if let Some(av) = &self.avatar_texture {
-                            let img = egui::Image::new(av.id(), av.size_vec2());
-                            ui.add(img);
+                            ui.image((av.id(), av.size_vec2()));
                         }
                         ui.label(format!("昵称: {}", user.name));
                         if user.live_room.room_status == 0 {
@@ -149,8 +149,7 @@ impl eframe::App for BiliApp {
                             ui.label(format!("直播间号: {}", room.room_id));
                             ui.label(format!("直播状态: {}", if room.live_status == 1 { "直播中" } else { "未开播" }));
                             if let Some(cv) = &self.cover_texture {
-                                let img = egui::Image::new(cv.id(), cv.size_vec2());
-                                ui.add(img);
+                                ui.image((cv.id(), cv.size_vec2()));
                             }
                             if ui.button(if room.live_status == 1 { "停止直播" } else { "开始直播" }).clicked() {
                                 if room.live_status == 1 {
@@ -186,14 +185,14 @@ impl eframe::App for BiliApp {
                                 ui.separator();
                                 ui.label("推流地址:");
                                 ui.horizontal(|h| {
-                                    h.add(egui::TextEdit::singleline(&mut self.push_addr).desired_width(300.0));
+                                    h.text_edit_singleline(&mut self.push_addr);
                                     if h.button("复制").clicked() {
                                         ctx.output_mut(|o| o.copied_text = self.push_addr.clone());
                                     }
                                 });
                                 ui.label("推流密钥:");
                                 ui.horizontal(|h| {
-                                    h.add(egui::TextEdit::singleline(&mut self.push_key).desired_width(300.0));
+                                    h.text_edit_singleline(&mut self.push_key);
                                     if h.button("复制").clicked() {
                                         ctx.output_mut(|o| o.copied_text = self.push_key.clone());
                                     }
@@ -255,7 +254,7 @@ impl eframe::App for BiliApp {
                         }
                     }
                     if let Some(tex) = &self.qr_texture {
-                        ui.add(egui::Image::new(tex.id(), tex.size_vec2()));
+                        ui.image((tex.id(), tex.size_vec2()));
                     }
                     if ui.button("检查扫码状态").clicked() {
                         if let Some(url) = &self.qr_url {
@@ -277,17 +276,6 @@ impl eframe::App for BiliApp {
                 }
             }
         });
-    }
-}
-
-// helper methods for BiliClient exposure
-trait HttpClientAccessor {
-    fn http_client(&self) -> &reqwest::Client;
-}
-
-impl HttpClientAccessor for BiliClient {
-    fn http_client(&self) -> &reqwest::Client {
-        self.http_client()
     }
 }
 
