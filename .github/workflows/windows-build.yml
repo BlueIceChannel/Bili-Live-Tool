@@ -28,7 +28,7 @@ jobs:
         run: Copy-Item target\release\gui.exe bili_live_tool_win64.exe
 
       - name: Upload exe artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: bili_live_tool_win64_exe
           path: bili_live_tool_win64.exe
@@ -37,7 +37,7 @@ jobs:
         run: git archive --format zip --output source_code.zip HEAD
 
       - name: Upload source code zip
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: source_code
           path: source_code.zip 
