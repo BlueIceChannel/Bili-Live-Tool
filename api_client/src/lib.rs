@@ -14,7 +14,7 @@ use std::sync::Arc;
 use reqwest::cookie::Jar;
 use rand::{seq::SliceRandom, thread_rng};
 use reqwest::header::USER_AGENT;
-use rsa::{pkcs8::DecodePublicKey, Oaep};
+use rsa::{pem::FromPem, RsaPublicKey, PaddingScheme};
 use sha2::Sha256;
 use hex;
 use regex::Regex;
@@ -349,9 +349,9 @@ impl BiliClient {
     }
 
     fn generate_correspond_path(ts: i64) -> anyhow::Result<String> {
-        let public_key = rsa::RsaPublicKey::from_public_key_pem(PUB_KEY_PEM)?;
+        let public_key = RsaPublicKey::from_public_key_pem(PUB_KEY_PEM)?;
         let plaintext = format!("refresh_{}", ts);
-        let padding = Oaep::new::<Sha256>();
+        let padding = PaddingScheme::new_pkcs1v15_encrypt();
         let mut rng = rand::thread_rng();
         let encrypted = public_key.encrypt(&mut rng, padding, plaintext.as_bytes())?;
         Ok(hex::encode(encrypted))

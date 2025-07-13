@@ -18,7 +18,6 @@ md5 = "0.7"
 qrcode = "0.12"
 directories = "5.0"
 rand = { version = "0.8", features = ["std"] }
-rsa = { version = "0.9", features = ["pkcs8"] } 
 sha2 = "0.10"
 hex = "0.4"
 regex = "1.10"
