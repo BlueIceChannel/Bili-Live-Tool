@@ -24,4 +24,4 @@ regex = "1.10"
 percent-encoding = "2.3"
 image = { version = "0.24", default-features = false, features = ["png", "jpeg"] }
 chrono = "0.4"
-rsa = { version = "0.9", features = ["pem", "pkcs8"] }
+rsa = { version = "0.9", features = ["pem"] }
