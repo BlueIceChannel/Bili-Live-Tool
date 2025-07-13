@@ -1,9 +1,9 @@
 //! 与 B 站交互的 HTTP 客户端，占位实现。
 
 use anyhow::Result;
-use domain::{LoginState, QrCodeData, RoomInfo, TokenInfo, Cookie as CookieInfo, AuthData, AreaParent, AreaChild, AuditInfo};
+use domain::{LoginState, QrCodeData, RoomInfo, TokenInfo, Cookie as CookieInfo, AuthData, AreaParent, AreaChild, AuditInfo, UserInfo, LiveRoomBrief};
 use reqwest::Client;
-use md5::{Digest, Md5};
+use md5;
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use directories::ProjectDirs;
@@ -14,12 +14,13 @@ use std::sync::Arc;
 use reqwest::cookie::Jar;
 use rand::{seq::SliceRandom, thread_rng};
 use reqwest::header::USER_AGENT;
-use rsa::{pem::FromPem, RsaPublicKey, PaddingScheme};
+use rsa::{pkcs8::DecodePublicKey, RsaPublicKey, Oaep};
 use sha2::Sha256;
 use hex;
 use regex::Regex;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use chrono;
+use reqwest::cookie::CookieStore;
 
 const APP_KEY: &str = "4409e2ce8ffd12b8"; // 云视听小电视
 const APP_SEC: &str = "59b43e04ad6965f34319062b478f83dd";
@@ -55,7 +56,7 @@ fn calc_sign(params: &BTreeMap<&str, String>) -> String {
         query.push_str(v);
     }
     query.push_str(APP_SEC);
-    let digest = Md5::digest(query.as_bytes());
+    let digest = md5::compute(query.as_bytes());
     format!("{:x}", digest)
 }
 
@@ -351,7 +352,7 @@ impl BiliClient {
     fn generate_correspond_path(ts: i64) -> anyhow::Result<String> {
         let public_key = RsaPublicKey::from_public_key_pem(PUB_KEY_PEM)?;
         let plaintext = format!("refresh_{}", ts);
-        let padding = PaddingScheme::new_pkcs1v15_encrypt();
+        let padding = Oaep::new::<Sha256>();
         let mut rng = rand::thread_rng();
         let encrypted = public_key.encrypt(&mut rng, padding, plaintext.as_bytes())?;
         Ok(hex::encode(encrypted))
@@ -537,7 +538,7 @@ impl BiliClient {
         params.insert("wts", wts.to_string());
         let query_sorted = Self::encode_params(&params);
         let sign_str = format!("{}{}", query_sorted, mixin_key);
-        let w_rid = format!("{:x}", Md5::digest(sign_str.as_bytes()));
+        let w_rid = format!("{:x}", md5::compute(sign_str.as_bytes()));
         let mut out = BTreeMap::new();
         for (k, v) in params {
             out.insert(k.to_string(), v);
