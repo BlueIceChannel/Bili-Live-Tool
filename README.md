@@ -89,6 +89,13 @@ macOS 与 Linux 同理，可通过 `strip` / `upx` 或 `cargo lipo`、`AppImage`
 - 自动更新检查
 - 国际化（i18n）
 
+## 致谢
+
+- **接口文档**：本项目所有 B 站接口均参考并遵循
+  [SocialSisterYi/bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect)
+  公开整理的 API 说明，特此感谢！
+- **生成方式**：本应用核心代码与文档主要由 AI（ChatGPT）在 Pair-Programming 环境中自动生成，人类开发者后期进行测试与微调。
+
 ## License
 
 MIT 
