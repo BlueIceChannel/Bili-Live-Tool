@@ -8,6 +8,7 @@ use image::io::Reader as ImageReader;
 use qrcode::Color;
 use reqwest;
 use serde_json::Value;
+use egui::Vec2;
 
 struct BiliApp {
     client: BiliClient,
@@ -245,34 +246,40 @@ impl eframe::App for BiliApp {
                     }
                 }
                 LoginState::NeedQrCode => {
-                    ui.heading("请扫码登录");
-                    if self.qr_texture.is_none() {
-                        // 首次进入，获取二维码
-                        if let Ok(qr) = self.rt.block_on(self.client.fetch_qr_code()) {
-                            self.qr_texture = Some(Self::load_qr_texture(&qr.url, ctx));
-                            self.qr_url = Some(qr.url);
+                    ui.vertical_centered(|ui| {
+                        ui.heading("请扫码登录");
+
+                        if self.qr_texture.is_none() {
+                            // 首次进入，获取二维码
+                            if let Ok(qr) = self.rt.block_on(self.client.fetch_qr_code()) {
+                                self.qr_texture = Some(Self::load_qr_texture(&qr.url, ctx));
+                                self.qr_url = Some(qr.url);
+                            }
                         }
-                    }
-                    if let Some(tex) = &self.qr_texture {
-                        ui.image((tex.id(), tex.size_vec2()));
-                    }
-                    if ui.button("检查扫码状态").clicked() {
-                        if let Some(url) = &self.qr_url {
-                            let qr_data = domain::QrCodeData { url: url.clone() };
-                            match self.rt.block_on(self.client.poll_qr_login(&qr_data)) {
-                                Ok(LoginState::LoggedIn) => {
-                                    self.login_state = LoginState::LoggedIn;
-                                    self.qr_texture = None;
-                                }
-                                Ok(LoginState::NeedQrCode) => {
-                                    ui.label("尚未扫码或已过期，请稍后重试/刷新。");
-                                }
-                                Err(e) => {
-                                    ui.label(format!("登录失败: {}", e));
+
+                        if let Some(tex) = &self.qr_texture {
+                            let desired = tex.size_vec2() * 2.0; // 放大 2 倍
+                            ui.image((tex.id(), desired));
+                        }
+
+                        if ui.button("检查扫码状态").clicked() {
+                            if let Some(url) = &self.qr_url {
+                                let qr_data = domain::QrCodeData { url: url.clone() };
+                                match self.rt.block_on(self.client.poll_qr_login(&qr_data)) {
+                                    Ok(LoginState::LoggedIn) => {
+                                        self.login_state = LoginState::LoggedIn;
+                                        self.qr_texture = None;
+                                    }
+                                    Ok(LoginState::NeedQrCode) => {
+                                        ui.label("尚未扫码或已过期，请稍后重试/刷新。");
+                                    }
+                                    Err(e) => {
+                                        ui.colored_label(egui::Color32::RED, format!("登录失败: {}", e));
+                                    }
                                 }
                             }
                         }
-                    }
+                    });
                 }
             }
         });
