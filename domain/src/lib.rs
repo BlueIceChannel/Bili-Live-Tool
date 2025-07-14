@@ -12,6 +12,12 @@ pub struct QrCodeData {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WebQrInfo {
+    pub url: String,
+    pub qrcode_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RoomInfo {
     pub room_id: u64,
     pub title: String,

@@ -1,6 +1,6 @@
 use api_client::BiliClient;
 use anyhow::Result;
-use domain::{LoginState, LiveRoomBrief, UserInfo, AreaParent};
+use domain::{LoginState, LiveRoomBrief, UserInfo, AreaParent, WebQrInfo};
 use eframe::{egui, Frame};
 use qrcode::QrCode;
 use tokio::runtime::Runtime;
@@ -8,7 +8,7 @@ use image::io::Reader as ImageReader;
 use qrcode::Color;
 use reqwest;
 use serde_json::Value;
-use egui::Vec2;
+use std::time::{Instant, Duration};
 
 struct BiliApp {
     client: BiliClient,
@@ -17,7 +17,7 @@ struct BiliApp {
     user_info: Option<UserInfo>,
     room_info: Option<LiveRoomBrief>,
     qr_texture: Option<egui::TextureHandle>,
-    qr_url: Option<String>,
+    qr_info: Option<WebQrInfo>,
     avatar_texture: Option<egui::TextureHandle>,
     cover_texture: Option<egui::TextureHandle>,
     area_list: Vec<AreaParent>,
@@ -26,25 +26,35 @@ struct BiliApp {
     selected_area_id: Option<i64>,
     push_addr: String,
     push_key: String,
+    last_qr_poll: Option<Instant>,
 }
 
 impl BiliApp {
-    /// 将二维码 URL 转换为 egui 纹理
+    /// 生成带静区且放大后的二维码纹理
     fn load_qr_texture(url: &str, ctx: &egui::Context) -> egui::TextureHandle {
         let code = QrCode::new(url.as_bytes()).expect("QR encode failed");
-        let image_side = code.width() as usize;
-        let mut pixels: Vec<u8> = Vec::with_capacity(image_side * image_side * 4);
-        for y in 0..image_side {
-            for x in 0..image_side {
-                let color = code[(x, y)];
-                let val = if color == Color::Dark { 0 } else { 255 };
-                pixels.extend_from_slice(&[val, val, val, 255]);
+        let module_count = code.width() as usize;
+        let margin_modules = 4; // 留白
+        let scale = 6; // 单模块像素数，控制大小与清晰度
+        let img_side = (module_count + margin_modules * 2) * scale;
+        let mut pixels = vec![255u8; img_side * img_side * 4]; // white background
+
+        for y in 0..module_count {
+            for x in 0..module_count {
+                if code[(x, y)] == Color::Dark {
+                    let start_x = (x + margin_modules) * scale;
+                    let start_y = (y + margin_modules) * scale;
+                    for dy in 0..scale {
+                        for dx in 0..scale {
+                            let idx = ((start_y + dy) * img_side + (start_x + dx)) * 4;
+                            pixels[idx..idx + 4].copy_from_slice(&[0, 0, 0, 255]);
+                        }
+                    }
+                }
             }
         }
-        let img = egui::ColorImage::from_rgba_unmultiplied([
-            image_side as usize,
-            image_side as usize,
-        ], &pixels);
+
+        let img = egui::ColorImage::from_rgba_unmultiplied([img_side, img_side], &pixels);
         ctx.load_texture("qr", img, Default::default())
     }
 
@@ -73,21 +83,19 @@ impl BiliApp {
 
 impl Default for BiliApp {
     fn default() -> Self {
-        let mut client = BiliClient::new();
+        let client = BiliClient::new();
         let rt = Runtime::new().expect("failed to create tokio runtime");
-        // 启动时尝试刷新 Cookie
-        if let Err(e) = rt.block_on(client.refresh_cookies_if_needed()) {
-            eprintln!("cookie refresh error: {}", e);
-        }
-
+        
+        let initial_state = rt.block_on(client.check_login_state()).unwrap_or(LoginState::NeedQrCode);
+        
         Self {
             client,
             rt,
-            login_state: LoginState::NeedQrCode,
+            login_state: initial_state,
             user_info: None,
             room_info: None,
             qr_texture: None,
-            qr_url: None,
+            qr_info: None,
             avatar_texture: None,
             cover_texture: None,
             area_list: Vec::new(),
@@ -96,6 +104,7 @@ impl Default for BiliApp {
             selected_area_id: None,
             push_addr: String::new(),
             push_key: String::new(),
+            last_qr_poll: None,
         }
     }
 }
@@ -103,130 +112,184 @@ impl Default for BiliApp {
 impl eframe::App for BiliApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
+            // 设置合理的宽度
+            let available_width = ui.available_width();
+            
+            ui.heading("B站直播工具");
+            ui.add_space(10.0);
+            
+            ui.label(format!("当前登录状态: {:?}", self.login_state));
+            ui.add_space(5.0);
+            
             match self.login_state {
                 LoginState::LoggedIn => {
                     if self.user_info.is_none() {
-                        // 获取当前登录用户 mid
-                        if let Ok(nav_json) = self.rt.block_on(async {
-                            self.client
-                                .client()
-                                .get("https://api.bilibili.com/x/web-interface/nav")
-                                .send()
-                                .await?
-                                .json::<serde_json::Value>()
-                                .await
-                        }) {
-                            let mid = nav_json["data"]["mid"].as_u64().unwrap_or(0);
-                            if mid != 0 {
-                                if let Ok(info) = self.rt.block_on(self.client.get_user_info(mid)) {
-                                    self.avatar_texture = Self::fetch_texture(&self.rt, self.client.client(), &info.face, ctx);
-                                    if info.live_room.room_status == 1 {
-                                        self.cover_texture = Self::fetch_texture(&self.rt, self.client.client(), &info.live_room.cover, ctx);
-                                    }
-                                    self.room_info = Some(info.live_room.clone());
-                                    self.user_info = Some(info);
-                                    if let Ok(list) = self.rt.block_on(self.client.get_area_list()) {
-                                        self.area_list = list;
-                                    }
-                                }
+                        ui.label("正在获取用户信息...");
+                        ctx.request_repaint();
+                        // 直接使用TV端API获取用户信息
+                        if let Ok(info) = self.rt.block_on(self.client.get_self_info()) {
+                            println!("获取到用户详细信息: {:?}", info);
+                            self.avatar_texture = Self::fetch_texture(&self.rt, self.client.client(), &info.face, ctx);
+                            if info.live_room.room_status == 1 {
+                                self.cover_texture = Self::fetch_texture(&self.rt, self.client.client(), &info.live_room.cover, ctx);
                             }
+                            self.room_info = Some(info.live_room.clone());
+                            self.user_info = Some(info);
+                            if let Ok(list) = self.rt.block_on(self.client.get_area_list()) {
+                                println!("获取到分区列表，数量: {}", list.len());
+                                self.area_list = list;
+                            }
+                            // 强制重绘
+                            ctx.request_repaint();
+                        } else {
+                            println!("获取用户信息失败");
+                            // 登录状态可能已失效，重置为未登录
+                            self.login_state = LoginState::NeedQrCode;
+                            self.qr_texture = None;
+                            self.qr_info = None;
+                            ctx.request_repaint();
                         }
                     }
 
                     if let Some(user) = &self.user_info {
-                        if let Some(av) = &self.avatar_texture {
-                            ui.image((av.id(), av.size_vec2()));
-                        }
-                        ui.label(format!("昵称: {}", user.name));
+                        ui.horizontal(|ui| {
+                            if let Some(av) = &self.avatar_texture {
+                                let avatar_size = 80.0;
+                                ui.image((av.id(), egui::vec2(avatar_size, avatar_size)));
+                                ui.add_space(10.0);
+                            }
+                            ui.vertical(|ui| {
+                                ui.heading(&user.name);
+                                ui.label(format!("UID: {}", user.mid));
+                            });
+                        });
+                        ui.add_space(10.0);
+                        
                         if user.live_room.room_status == 0 {
                             ui.colored_label(egui::Color32::YELLOW, "该用户无房间");
                             return;
                         }
+                        
                         if let Some(room) = &mut self.room_info {
-                            ui.horizontal(|h| {
-                                h.label("标题: ");
-                                h.text_edit_singleline(&mut room.title);
-                            });
-                            ui.label(format!("直播间号: {}", room.room_id));
-                            ui.label(format!("直播状态: {}", if room.live_status == 1 { "直播中" } else { "未开播" }));
-                            if let Some(cv) = &self.cover_texture {
-                                ui.image((cv.id(), cv.size_vec2()));
-                            }
-                            if ui.button(if room.live_status == 1 { "停止直播" } else { "开始直播" }).clicked() {
-                                if room.live_status == 1 {
-                                    // stop live
-                                    match self.rt.block_on(self.client.stop_live(room.room_id)) {
-                                        Ok(()) => {
-                                            room.live_status = 0;
-                                            self.push_addr.clear();
-                                            self.push_key.clear();
-                                        }
-                                        Err(e) => {
-                                            ui.colored_label(egui::Color32::RED, format!("关播失败: {}", e));
-                                        }
-                                    }
-                                } else {
-                                    if let Some(area_id) = self.selected_area_id {
-                                        match self.rt.block_on(self.client.start_live(room.room_id, area_id)) {
-                                            Ok((addr, key)) => {
-                                                room.live_status = 1;
-                                                self.push_addr = addr;
-                                                self.push_key = key;
+                            ui.group(|ui| {
+                                ui.heading("直播间信息");
+                                ui.add_space(5.0);
+                                
+                                ui.horizontal(|ui| {
+                                    ui.label("标题: ");
+                                    ui.add(egui::TextEdit::singleline(&mut room.title).desired_width(available_width * 0.7));
+                                });
+                                
+                                ui.label(format!("直播间号: {}", room.room_id));
+                                ui.label(format!("直播状态: {}", if room.live_status == 1 { "直播中" } else { "未开播" }));
+                                
+                                if let Some(cv) = &self.cover_texture {
+                                    let cover_height = 180.0;
+                                    let cover_width = cover_height * 16.0 / 9.0; // 16:9 比例
+                                    ui.image((cv.id(), egui::vec2(cover_width, cover_height)));
+                                }
+                                
+                                ui.add_space(10.0);
+                                if ui.add_sized([200.0, 30.0], egui::Button::new(
+                                    if room.live_status == 1 { "停止直播" } else { "开始直播" }
+                                )).clicked() {
+                                    if room.live_status == 1 {
+                                        // stop live
+                                        match self.rt.block_on(self.client.stop_live(room.room_id)) {
+                                            Ok(()) => {
+                                                room.live_status = 0;
+                                                self.push_addr.clear();
+                                                self.push_key.clear();
                                             }
                                             Err(e) => {
-                                                ui.colored_label(egui::Color32::RED, format!("开播失败: {}", e));
+                                                ui.colored_label(egui::Color32::RED, format!("关播失败: {}", e));
                                             }
                                         }
                                     } else {
-                                        ui.colored_label(egui::Color32::YELLOW, "请先选择分区");
+                                        if let Some(area_id) = self.selected_area_id {
+                                            match self.rt.block_on(self.client.start_live(room.room_id, area_id)) {
+                                                Ok((addr, key)) => {
+                                                    room.live_status = 1;
+                                                    self.push_addr = addr;
+                                                    self.push_key = key;
+                                                }
+                                                Err(e) => {
+                                                    ui.colored_label(egui::Color32::RED, format!("开播失败: {}", e));
+                                                }
+                                            }
+                                        } else {
+                                            ui.colored_label(egui::Color32::YELLOW, "请先选择分区");
+                                        }
                                     }
                                 }
-                            }
+                            });
+                            
+                            ui.add_space(10.0);
+                            
                             if room.live_status == 1 && !self.push_addr.is_empty() {
-                                ui.separator();
-                                ui.label("推流地址:");
-                                ui.horizontal(|h| {
-                                    h.text_edit_singleline(&mut self.push_addr);
-                                    if h.button("复制").clicked() {
-                                        ctx.output_mut(|o| o.copied_text = self.push_addr.clone());
-                                    }
+                                ui.group(|ui| {
+                                    ui.heading("推流信息");
+                                    ui.add_space(5.0);
+                                    
+                                    ui.label("推流地址:");
+                                    ui.horizontal(|ui| {
+                                        ui.add(egui::TextEdit::singleline(&mut self.push_addr).desired_width(available_width * 0.7));
+                                        if ui.add_sized([80.0, 24.0], egui::Button::new("复制")).clicked() {
+                                            ctx.output_mut(|o| o.copied_text = self.push_addr.clone());
+                                        }
+                                    });
+                                    
+                                    ui.label("推流密钥:");
+                                    ui.horizontal(|ui| {
+                                        ui.add(egui::TextEdit::singleline(&mut self.push_key).desired_width(available_width * 0.7));
+                                        if ui.add_sized([80.0, 24.0], egui::Button::new("复制")).clicked() {
+                                            ctx.output_mut(|o| o.copied_text = self.push_key.clone());
+                                        }
+                                    });
                                 });
-                                ui.label("推流密钥:");
-                                ui.horizontal(|h| {
-                                    h.text_edit_singleline(&mut self.push_key);
-                                    if h.button("复制").clicked() {
-                                        ctx.output_mut(|o| o.copied_text = self.push_key.clone());
-                                    }
-                                });
+                                ui.add_space(10.0);
                             }
+                            
                             if !self.area_list.is_empty() {
-                                ui.horizontal(|h| {
-                                    // parent combo
-                                    let parent_names: Vec<_> = self.area_list.iter().map(|p| p.name.as_str()).collect();
-                                    egui::ComboBox::from_label("父分区")
-                                        .selected_text(parent_names[self.selected_parent])
-                                        .show_ui(h, |ui_inner| {
-                                            for (idx, p) in parent_names.iter().enumerate() {
-                                                ui_inner.selectable_value(&mut self.selected_parent, idx, *p);
-                                            }
-                                        });
-                                    // ensure selected_child within bounds
-                                    if self.selected_parent >= self.area_list.len() { self.selected_parent = 0; }
-                                    let child_list = &self.area_list[self.selected_parent].children;
-                                    if child_list.is_empty() { return; }
-                                    if self.selected_child >= child_list.len() { self.selected_child = 0; }
-                                    let child_names: Vec<_> = child_list.iter().map(|c| c.name.as_str()).collect();
-                                    egui::ComboBox::from_label("子分区")
-                                        .selected_text(child_names[self.selected_child])
-                                        .show_ui(h, |ui_inner| {
-                                            for (idx, c) in child_names.iter().enumerate() {
-                                                ui_inner.selectable_value(&mut self.selected_child, idx, *c);
-                                            }
-                                        });
-                                    self.selected_area_id = Some(child_list[self.selected_child].id);
+                                ui.group(|ui| {
+                                    ui.heading("分区设置");
+                                    ui.add_space(5.0);
+                                    
+                                    ui.horizontal(|ui| {
+                                        // parent combo
+                                        let parent_names: Vec<_> = self.area_list.iter().map(|p| p.name.as_str()).collect();
+                                        egui::ComboBox::from_label("父分区")
+                                            .width(200.0)
+                                            .selected_text(parent_names[self.selected_parent])
+                                            .show_ui(ui, |ui| {
+                                                for (idx, p) in parent_names.iter().enumerate() {
+                                                    ui.selectable_value(&mut self.selected_parent, idx, *p);
+                                                }
+                                            });
+                                            
+                                        ui.add_space(20.0);
+                                        
+                                        // ensure selected_child within bounds
+                                        if self.selected_parent >= self.area_list.len() { self.selected_parent = 0; }
+                                        let child_list = &self.area_list[self.selected_parent].children;
+                                        if child_list.is_empty() { return; }
+                                        if self.selected_child >= child_list.len() { self.selected_child = 0; }
+                                        let child_names: Vec<_> = child_list.iter().map(|c| c.name.as_str()).collect();
+                                        egui::ComboBox::from_label("子分区")
+                                            .width(200.0)
+                                            .selected_text(child_names[self.selected_child])
+                                            .show_ui(ui, |ui| {
+                                                for (idx, c) in child_names.iter().enumerate() {
+                                                    ui.selectable_value(&mut self.selected_child, idx, *c);
+                                                }
+                                            });
+                                        self.selected_area_id = Some(child_list[self.selected_child].id);
+                                    });
                                 });
+                                ui.add_space(10.0);
                             }
-                            if ui.button("保存设置").clicked() {
+                            
+                            if ui.add_sized([200.0, 30.0], egui::Button::new("保存设置")).clicked() {
                                 let area_id_opt = self.selected_area_id;
                                 let title_clone = room.title.clone();
                                 let res = self.rt.block_on(self.client.update_room_info(room.room_id, Some(&title_clone), area_id_opt));
@@ -235,10 +298,10 @@ impl eframe::App for BiliApp {
                                         if audit.audit_title_status != 0 {
                                             ui.colored_label(egui::Color32::YELLOW, format!("标题审核状态: {} - {}", audit.audit_title_status, audit.audit_title_reason));
                                         } else {
-                                            ui.label("更新成功");
+                                            ui.colored_label(egui::Color32::GREEN, "更新成功");
                                         }
                                     }
-                                    Ok(None) => { ui.label("更新成功"); }
+                                    Ok(None) => { ui.colored_label(egui::Color32::GREEN, "更新成功"); }
                                     Err(e) => { ui.colored_label(egui::Color32::RED, format!("更新失败: {}", e)); }
                                 }
                             }
@@ -246,32 +309,51 @@ impl eframe::App for BiliApp {
                     }
                 }
                 LoginState::NeedQrCode => {
+                    // 自动轮询扫码结果：每 2 秒检查一次
+                    if let Some(qr) = &self.qr_info {
+                        let should_poll = self.last_qr_poll.map_or(true, |t| t.elapsed() >= Duration::from_secs(2));
+                        if should_poll {
+                            self.last_qr_poll = Some(Instant::now());
+                            if let Ok(LoginState::LoggedIn) = self.rt.block_on(self.client.poll_qr_login(qr)) {
+                                self.login_state = LoginState::LoggedIn;
+                                self.qr_texture = None;
+                                self.qr_info = None;
+                                ctx.request_repaint();
+                                println!("登录成功，状态已更新为LoggedIn");
+                            }
+                        }
+                    }
+
                     ui.vertical_centered(|ui| {
                         ui.heading("请扫码登录");
-
+                        ui.add_space(20.0);
+                        
                         if self.qr_texture.is_none() {
                             // 首次进入，获取二维码
                             if let Ok(qr) = self.rt.block_on(self.client.fetch_qr_code()) {
                                 self.qr_texture = Some(Self::load_qr_texture(&qr.url, ctx));
-                                self.qr_url = Some(qr.url);
+                                self.qr_info = Some(qr);
                             }
                         }
-
+                        
                         if let Some(tex) = &self.qr_texture {
-                            let desired = tex.size_vec2() * 2.0; // 放大 2 倍
-                            ui.image((tex.id(), desired));
+                            ui.add_space(10.0);
+                            ui.image((tex.id(), tex.size_vec2()));
+                            ui.add_space(20.0);
                         }
-
-                        if ui.button("检查扫码状态").clicked() {
-                            if let Some(url) = &self.qr_url {
-                                let qr_data = domain::QrCodeData { url: url.clone() };
-                                match self.rt.block_on(self.client.poll_qr_login(&qr_data)) {
+                        
+                        if ui.add_sized([200.0, 30.0], egui::Button::new("手动检查扫码状态")).clicked() {
+                            if let Some(qr) = &self.qr_info {
+                                match self.rt.block_on(self.client.poll_qr_login(qr)) {
                                     Ok(LoginState::LoggedIn) => {
                                         self.login_state = LoginState::LoggedIn;
                                         self.qr_texture = None;
+                                        self.qr_info = None;
+                                        ctx.request_repaint();
+                                        println!("手动检查：登录成功，状态已更新为LoggedIn");
                                     }
                                     Ok(LoginState::NeedQrCode) => {
-                                        ui.label("尚未扫码或已过期，请稍后重试/刷新。");
+                                        ui.colored_label(egui::Color32::YELLOW, "尚未扫码或已过期，请稍后重试/刷新。");
                                     }
                                     Err(e) => {
                                         ui.colored_label(egui::Color32::RED, format!("登录失败: {}", e));
@@ -287,11 +369,70 @@ impl eframe::App for BiliApp {
 }
 
 fn main() -> Result<()> {
-    let native_options = eframe::NativeOptions::default();
-    eframe::run_native(
+    let mut native_options = eframe::NativeOptions::default();
+    native_options.viewport.inner_size = Some(egui::vec2(800.0, 600.0));
+    
+    // 使用默认渲染器
+    // native_options.renderer = eframe::Renderer::Glow;
+    
+    // 启用深色模式
+    native_options.follow_system_theme = false;
+    native_options.default_theme = eframe::Theme::Dark;
+    
+    let result = eframe::run_native(
         "Bili Live Tool",
         native_options,
-        Box::new(|_cc| Box::new(BiliApp::default())),
+        Box::new(|cc| {
+            // --- START NEW LOGIC ---
+            // 1. Load font
+            let mut fonts = egui::FontDefinitions::default();
+            fonts.font_data.insert(
+                "msyh".to_owned(),
+                egui::FontData::from_static(include_bytes!("../assets/msyh.ttc")),
+            );
+            fonts.families
+                .entry(egui::FontFamily::Proportional)
+                .or_default()
+                .insert(0, "msyh".to_owned());
+            fonts.families
+                .entry(egui::FontFamily::Monospace)
+                .or_default()
+                .push("msyh".to_owned());
+            cc.egui_ctx.set_fonts(fonts);
+
+            // 2. Set style
+            let mut style = (*cc.egui_ctx.style()).clone();
+            style.text_styles = [
+                (egui::TextStyle::Heading, egui::FontId::proportional(24.0)),
+                (egui::TextStyle::Body, egui::FontId::proportional(18.0)),
+                (egui::TextStyle::Monospace, egui::FontId::monospace(16.0)),
+                (egui::TextStyle::Button, egui::FontId::proportional(16.0)),
+                (egui::TextStyle::Small, egui::FontId::proportional(12.0)),
+            ].into();
+            
+            // Use the dark visuals from egui as a base
+            let mut visuals = egui::Visuals::dark();
+            visuals.override_text_color = Some(egui::Color32::from_rgb(255, 255, 255));
+            
+            // Customize widget colors
+            visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(30, 30, 30);
+            visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_rgb(255, 255, 255);
+            visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(50, 50, 50);
+            visuals.widgets.inactive.fg_stroke.color = egui::Color32::from_rgb(255, 255, 255);
+            visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(70, 70, 70);
+            visuals.widgets.hovered.fg_stroke.color = egui::Color32::from_rgb(255, 255, 255);
+            visuals.widgets.active.bg_fill = egui::Color32::from_rgb(90, 90, 90);
+            visuals.widgets.active.fg_stroke.color = egui::Color32::from_rgb(255, 255, 255);
+            
+            visuals.window_fill = egui::Color32::from_rgb(20, 20, 20);
+            
+            style.visuals = visuals; // Set the customized visuals to the style
+            cc.egui_ctx.set_style(style); // Set the full style
+            
+            Box::new(BiliApp::default())
+            // --- END NEW LOGIC ---
+        }),
     );
-    Ok(())
+    
+    result.map_err(Into::into)
 } 
