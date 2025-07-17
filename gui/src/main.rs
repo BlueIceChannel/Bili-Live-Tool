@@ -413,7 +413,7 @@ impl eframe::App for BiliApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(format!("v{}", self.version));
                         ui.add_space(10.0);
-                        ui.hyperlink_to("源代码", "https://github.com/zmhu/bili-live-tool");
+                        ui.hyperlink_to("源代码", "https://github.com/BlueIceChannel/Bili-Live-Tool");
                     });
                 });
             });

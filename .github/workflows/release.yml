@@ -10,7 +10,7 @@ jobs:
     name: Build Linux
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Install Rust
         uses: actions-rs/toolchain@v1
         with:
@@ -30,7 +30,7 @@ jobs:
           tar -czvf bili-live-tool-linux-x86_64.tar.gz -C release .
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: bili-live-tool-linux-x86_64
           path: bili-live-tool-linux-x86_64.tar.gz
@@ -39,7 +39,7 @@ jobs:
     name: Build Windows
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Install Rust
         uses: actions-rs/toolchain@v1
         with:
@@ -54,7 +54,7 @@ jobs:
           7z a -tzip bili-live-tool-windows-x64.zip ./release/*
           
       - name: Upload artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: bili-live-tool-windows-x64
           path: bili-live-tool-windows-x64.zip
@@ -63,7 +63,7 @@ jobs:
     name: Build macOS
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Install Rust
         uses: actions-rs/toolchain@v1
         with:
@@ -90,13 +90,13 @@ jobs:
           zip -r bili-live-tool-macos-apple-silicon.zip release_apple_silicon
       
       - name: Upload Intel artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: bili-live-tool-macos-intel
           path: bili-live-tool-macos-intel.zip
           
       - name: Upload Apple Silicon artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: bili-live-tool-macos-apple-silicon
           path: bili-live-tool-macos-apple-silicon.zip
@@ -107,7 +107,7 @@ jobs:
     needs: [build-linux, build-windows, build-macos]
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           path: artifacts
 
