@@ -1,0 +1,99 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+
+jobs:
+  build-linux:
+    name: Build Linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Build
+        run: cargo build --release --bin gui
+      - name: Package
+        run: |
+          mkdir -p release
+          cp target/release/gui release/
+          strip release/gui
+          tar -czvf bili-live-tool-linux-x86_64.tar.gz -C release .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: bili-live-tool-linux-x86_64
+          path: bili-live-tool-linux-x86_64.tar.gz
+
+  build-macos:
+    name: Build macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          target: aarch64-apple-darwin
+      - name: Build for Intel
+        run: cargo build --release --bin gui --target x86_64-apple-darwin
+      - name: Build for Apple Silicon
+        run: cargo build --release --bin gui --target aarch64-apple-darwin
+
+      - name: Package Intel
+        run: |
+          mkdir -p release_intel
+          cp target/x86_64-apple-darwin/release/gui release_intel/
+          strip release_intel/gui
+          zip -r bili-live-tool-macos-intel.zip release_intel
+
+      - name: Package Apple Silicon
+        run: |
+          mkdir -p release_apple_silicon
+          cp target/aarch64-apple-darwin/release/gui release_apple_silicon/
+          strip release_apple_silicon/gui
+          zip -r bili-live-tool-macos-apple-silicon.zip release_apple_silicon
+      
+      - name: Upload Intel artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: bili-live-tool-macos-intel
+          path: bili-live-tool-macos-intel.zip
+          
+      - name: Upload Apple Silicon artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: bili-live-tool-macos-apple-silicon
+          path: bili-live-tool-macos-apple-silicon.zip
+
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [build-linux, build-macos]
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/bili-live-tool-linux-x86_64/bili-live-tool-linux-x86_64.tar.gz
+            artifacts/bili-live-tool-macos-intel/bili-live-tool-macos-intel.zip
+            artifacts/bili-live-tool-macos-apple-silicon/bili-live-tool-macos-apple-silicon.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 

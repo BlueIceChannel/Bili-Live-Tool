@@ -1,3 +1,4 @@
+#![windows_subsystem = "windows"] // 在Windows上隐藏控制台窗口
 use api_client::BiliClient;
 use anyhow::Result;
 use domain::{LoginState, LiveRoomBrief, UserInfo, AreaParent, WebQrInfo};
@@ -7,8 +8,8 @@ use tokio::runtime::Runtime;
 use image::io::Reader as ImageReader;
 use qrcode::Color;
 use reqwest;
-use serde_json::Value;
 use std::time::{Instant, Duration};
+use std::sync::Arc;
 
 struct BiliApp {
     client: BiliClient,
@@ -29,6 +30,7 @@ struct BiliApp {
     last_qr_poll: Option<Instant>,
     last_user_info_fetch: Option<Instant>,
     area_list_fetch_error: Option<String>,
+    version: String,
 }
 
 impl BiliApp {
@@ -109,308 +111,337 @@ impl Default for BiliApp {
             last_qr_poll: None,
             last_user_info_fetch: None,
             area_list_fetch_error: None,
+            version: env!("CARGO_PKG_VERSION").to_string(),
         }
     }
 }
 
 impl eframe::App for BiliApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default()
+            .frame(egui::Frame::default().inner_margin(egui::Margin::ZERO))
+            .show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                // 设置合理的宽度
-                let available_width = ui.available_width();
-            
-                ui.heading("B站直播工具");
-                ui.add_space(10.0);
-                
-                ui.label(format!("当前登录状态: {:?}", self.login_state));
-                ui.add_space(5.0);
-                
-                match self.login_state {
-                    LoginState::LoggedIn => {
-                        if self.user_info.is_none() {
-                            let should_fetch = self.last_user_info_fetch.map_or(true, |t| t.elapsed() >= Duration::from_secs(5));
+                let frame = egui::Frame::default().inner_margin(egui::Margin::same(16.0));
+                frame.show(ui, |ui|{
+                    ui.heading("B站直播工具");
+                    ui.add_space(10.0);
+                    
+                    ui.label(format!("当前登录状态: {:?}", self.login_state));
+                    ui.add_space(5.0);
+                    
+                    match self.login_state {
+                        LoginState::LoggedIn => {
+                            if self.user_info.is_none() {
+                                let should_fetch = self.last_user_info_fetch.map_or(true, |t| t.elapsed() >= Duration::from_secs(5));
 
-                            if should_fetch {
-                                self.last_user_info_fetch = Some(Instant::now());
-                                ui.label("正在获取用户信息...");
-                                ctx.request_repaint();
-                                
-                                match self.rt.block_on(self.client.get_self_info()) {
-                                    Ok(info) => {
-                                        println!("获取到用户详细信息: {:?}", info);
-                                        self.avatar_texture = Self::fetch_texture(&self.rt, self.client.client(), &info.face, ctx);
-                                        if info.live_room.room_status == 1 {
-                                            self.cover_texture = Self::fetch_texture(&self.rt, self.client.client(), &info.live_room.cover, ctx);
-                                        }
-                                        self.room_info = Some(info.live_room.clone());
-                                        self.user_info = Some(info);
-                                        if let Ok(list) = self.rt.block_on(self.client.get_area_list()) {
-                                            println!("获取到分区列表，数量: {}", list.len());
-                                            self.area_list = list;
-                                            self.area_list_fetch_error = None;
-                                        } else {
-                                            let err_msg = "获取分区列表失败，请稍后重试".to_string();
-                                            println!("{}", err_msg);
-                                            self.area_list_fetch_error = Some(err_msg);
-                                        }
-                                        // 强制重绘
-                                        ctx.request_repaint();
-                                    },
-                                    Err(e) => {
-                                        println!("获取用户信息失败: {}", e);
-                                        // 不要立即重置登录状态，让它在5秒后重试
-                                    }
-                                }
-                            } else {
-                                ui.label("获取用户信息失败，正在重试...");
-                            }
-                        }
-
-                        if let Some(user) = &self.user_info {
-                            ui.horizontal(|ui| {
-                                if let Some(av) = &self.avatar_texture {
-                                    let avatar_size = 80.0;
-                                    ui.image((av.id(), egui::vec2(avatar_size, avatar_size)));
-                                    ui.add_space(10.0);
-                                }
-                                ui.vertical(|ui| {
-                                    ui.heading(&user.name);
-                                    ui.label(format!("UID: {}", user.mid));
-                                });
-                            });
-                            ui.add_space(10.0);
-                            
-                            if user.live_room.room_status == 0 {
-                                let elapsed = self.last_user_info_fetch.map_or(Duration::from_secs(5), |t| t.elapsed());
-
-                                if elapsed >= Duration::from_secs(5) {
-                                    self.user_info = None;
-                                    self.room_info = None;
-                                    self.last_user_info_fetch = None;
+                                if should_fetch {
+                                    self.last_user_info_fetch = Some(Instant::now());
+                                    ui.label("正在获取用户信息...");
                                     ctx.request_repaint();
-                                } else {
-                                    let remaining = Duration::from_secs(5) - elapsed;
-                                    ui.colored_label(egui::Color32::YELLOW, format!("未能获取直播间信息，{:.0}秒后自动重试...", remaining.as_secs_f32().ceil()));
-                                    ctx.request_repaint_after(Duration::from_secs(1));
-                                }
-                                return;
-                            }
-                            
-                            if let Some(room) = &mut self.room_info {
-                                ui.group(|ui| {
-                                    ui.heading("直播间信息");
-                                    ui.add_space(5.0);
                                     
-                                    ui.horizontal(|ui| {
-                                        ui.label("标题: ");
-                                        ui.add(egui::TextEdit::singleline(&mut room.title).desired_width(available_width * 0.7));
-                                    });
-                                    
-                                    ui.label(format!("直播间号: {}", room.room_id));
-                                    ui.label(format!("直播状态: {}", if room.live_status == 1 { "直播中" } else { "未开播" }));
-                                    
-                                    if let Some(cv) = &self.cover_texture {
-                                        let cover_height = 180.0;
-                                        let cover_width = cover_height * 16.0 / 9.0; // 16:9 比例
-                                        ui.image((cv.id(), egui::vec2(cover_width, cover_height)));
-                                    }
-                                    
-                                    ui.add_space(10.0);
-                                    let area_fetch_failed = self.area_list_fetch_error.is_some();
-                                    ui.add_enabled_ui(!area_fetch_failed, |ui| {
-                                        if ui.add_sized([200.0, 30.0], egui::Button::new(
-                                            if room.live_status == 1 { "停止直播" } else { "开始直播" }
-                                        )).clicked() {
-                                            if room.live_status == 1 {
-                                                // stop live
-                                                match self.rt.block_on(self.client.stop_live(room.room_id)) {
-                                                    Ok(()) => {
-                                                        room.live_status = 0;
-                                                        self.push_addr.clear();
-                                                        self.push_key.clear();
-                                                    }
-                                                    Err(e) => {
-                                                        ui.colored_label(egui::Color32::RED, format!("关播失败: {}", e));
-                                                    }
-                                                }
+                                    match self.rt.block_on(self.client.get_self_info()) {
+                                        Ok(info) => {
+                                            println!("获取到用户详细信息: {:?}", info);
+                                            self.avatar_texture = Self::fetch_texture(&self.rt, self.client.client(), &info.face, ctx);
+                                            if info.live_room.room_status == 1 {
+                                                self.cover_texture = Self::fetch_texture(&self.rt, self.client.client(), &info.live_room.cover, ctx);
+                                            }
+                                            self.room_info = Some(info.live_room.clone());
+                                            self.user_info = Some(info);
+                                            if let Ok(list) = self.rt.block_on(self.client.get_area_list()) {
+                                                println!("获取到分区列表，数量: {}", list.len());
+                                                self.area_list = list;
+                                                self.area_list_fetch_error = None;
                                             } else {
-                                                if let Some(area_id) = self.selected_area_id {
-                                                    match self.rt.block_on(self.client.start_live(room.room_id, area_id)) {
-                                                        Ok((addr, key)) => {
-                                                            room.live_status = 1;
-                                                            self.push_addr = addr;
-                                                            self.push_key = key;
+                                                let err_msg = "获取分区列表失败，请稍后重试".to_string();
+                                                println!("{}", err_msg);
+                                                self.area_list_fetch_error = Some(err_msg);
+                                            }
+                                            // 强制重绘
+                                            ctx.request_repaint();
+                                        },
+                                        Err(e) => {
+                                            println!("获取用户信息失败: {}", e);
+                                            // 不要立即重置登录状态，让它在5秒后重试
+                                        }
+                                    }
+                                } else {
+                                    ui.label("获取用户信息失败，正在重试...");
+                                }
+                            }
+
+                            if let Some(user) = &self.user_info {
+                                ui.horizontal(|ui| {
+                                    if let Some(av) = &self.avatar_texture {
+                                        let avatar_size = 80.0;
+                                        ui.image((av.id(), egui::vec2(avatar_size, avatar_size)));
+                                        ui.add_space(10.0);
+                                    }
+                                    ui.vertical(|ui| {
+                                        ui.heading(&user.name);
+                                        ui.label(format!("UID: {}", user.mid));
+                                    });
+                                });
+                                ui.add_space(10.0);
+                                
+                                if user.live_room.room_status == 0 {
+                                    let elapsed = self.last_user_info_fetch.map_or(Duration::from_secs(5), |t| t.elapsed());
+
+                                    if elapsed >= Duration::from_secs(5) {
+                                        self.user_info = None;
+                                        self.room_info = None;
+                                        self.last_user_info_fetch = None;
+                                        ctx.request_repaint();
+                                    } else {
+                                        let remaining = Duration::from_secs(5) - elapsed;
+                                        ui.colored_label(egui::Color32::YELLOW, format!("未能获取直播间信息，{:.0}秒后自动重试...", remaining.as_secs_f32().ceil()));
+                                        ctx.request_repaint_after(Duration::from_secs(1));
+                                    }
+                                    return;
+                                }
+                                
+                                if let Some(room) = &mut self.room_info {
+                                    ui.group(|ui| {
+                                        ui.heading("直播间信息");
+                                        ui.add_space(5.0);
+                                        
+                                        ui.horizontal(|ui| {
+                                            ui.label("标题: ");
+                                            ui.add(egui::TextEdit::singleline(&mut room.title).desired_width(f32::INFINITY));
+                                        });
+                                        
+                                        ui.label(format!("直播间号: {}", room.room_id));
+                                        ui.label(format!("直播状态: {}", if room.live_status == 1 { "直播中" } else { "未开播" }));
+                                        
+                                        if let Some(cv) = &self.cover_texture {
+                                            let cover_height = 180.0;
+                                            let cover_width = cover_height * 16.0 / 9.0; // 16:9 比例
+                                            ui.image((cv.id(), egui::vec2(cover_width, cover_height)));
+                                        }
+                                        
+                                        ui.add_space(10.0);
+                                        let area_fetch_failed = self.area_list_fetch_error.is_some();
+                                        ui.add_enabled_ui(!area_fetch_failed, |ui| {
+                                            if ui.add_sized([200.0, 30.0], egui::Button::new(
+                                                if room.live_status == 1 { "停止直播" } else { "开始直播" }
+                                            )).clicked() {
+                                                if room.live_status == 1 {
+                                                    // stop live
+                                                    match self.rt.block_on(self.client.stop_live(room.room_id)) {
+                                                        Ok(()) => {
+                                                            room.live_status = 0;
+                                                            self.push_addr.clear();
+                                                            self.push_key.clear();
                                                         }
                                                         Err(e) => {
-                                                            ui.colored_label(egui::Color32::RED, format!("开播失败: {}", e));
+                                                            ui.colored_label(egui::Color32::RED, format!("关播失败: {}", e));
                                                         }
                                                     }
                                                 } else {
-                                                    ui.colored_label(egui::Color32::YELLOW, "请先选择分区");
+                                                    if let Some(area_id) = self.selected_area_id {
+                                                        match self.rt.block_on(self.client.start_live(room.room_id, area_id)) {
+                                                            Ok((addr, key)) => {
+                                                                room.live_status = 1;
+                                                                self.push_addr = addr;
+                                                                self.push_key = key;
+                                                            }
+                                                            Err(e) => {
+                                                                ui.colored_label(egui::Color32::RED, format!("开播失败: {}", e));
+                                                            }
+                                                        }
+                                                    } else {
+                                                        ui.colored_label(egui::Color32::YELLOW, "请先选择分区");
+                                                    }
                                                 }
+                                            }
+                                        });
+                                        if area_fetch_failed {
+                                            ui.colored_label(egui::Color32::RED, self.area_list_fetch_error.as_deref().unwrap_or(""));
+                                        }
+                                    });
+                                    
+                                    ui.add_space(10.0);
+                                    
+                                    if room.live_status == 1 && !self.push_addr.is_empty() {
+                                        ui.group(|ui| {
+                                            ui.heading("推流信息");
+                                            ui.add_space(5.0);
+                                            
+                                            ui.label("推流地址:");
+                                            ui.horizontal(|ui| {
+                                                ui.add(egui::TextEdit::singleline(&mut self.push_addr).desired_width(f32::INFINITY));
+                                                if ui.button("复制").clicked() {
+                                                    ctx.output_mut(|o| o.copied_text = self.push_addr.clone());
+                                                }
+                                            });
+                                            
+                                            ui.label("推流密钥:");
+                                            ui.horizontal(|ui| {
+                                                ui.add(egui::TextEdit::singleline(&mut self.push_key).desired_width(f32::INFINITY));
+                                                if ui.button("复制").clicked() {
+                                                    ctx.output_mut(|o| o.copied_text = self.push_key.clone());
+                                                }
+                                            });
+                                        });
+                                        ui.add_space(10.0);
+                                    }
+                                    
+                                    if !self.area_list.is_empty() {
+                                        ui.group(|ui| {
+                                            ui.heading("分区设置");
+                                            ui.add_space(5.0);
+                                            
+                                            ui.horizontal(|ui| {
+                                                // parent combo
+                                                let parent_names: Vec<_> = self.area_list.iter().map(|p| p.name.as_str()).collect();
+                                                egui::ComboBox::from_label("父分区")
+                                                    .width(200.0)
+                                                    .selected_text(parent_names[self.selected_parent])
+                                                    .show_ui(ui, |ui| {
+                                                        for (idx, p) in parent_names.iter().enumerate() {
+                                                            ui.selectable_value(&mut self.selected_parent, idx, *p);
+                                                        }
+                                                    });
+                                                    
+                                                ui.add_space(20.0);
+                                                
+                                                // ensure selected_child within bounds
+                                                if self.selected_parent >= self.area_list.len() { self.selected_parent = 0; }
+                                                let child_list = &self.area_list[self.selected_parent].children;
+                                                if child_list.is_empty() { return; }
+                                                if self.selected_child >= child_list.len() { self.selected_child = 0; }
+                                                let child_names: Vec<_> = child_list.iter().map(|c| c.name.as_str()).collect();
+                                                egui::ComboBox::from_label("子分区")
+                                                    .width(200.0)
+                                                    .selected_text(child_names[self.selected_child])
+                                                    .show_ui(ui, |ui| {
+                                                        for (idx, c) in child_names.iter().enumerate() {
+                                                            ui.selectable_value(&mut self.selected_child, idx, *c);
+                                                        }
+                                                    });
+                                                self.selected_area_id = Some(child_list[self.selected_child].id);
+                                            });
+                                        });
+                                        ui.add_space(10.0);
+                                    }
+                                    
+                                    let area_fetch_failed = self.area_list_fetch_error.is_some();
+                                    ui.add_enabled_ui(!area_fetch_failed, |ui|{
+                                        if ui.add_sized([200.0, 30.0], egui::Button::new("保存设置")).clicked() {
+                                            let area_id_opt = self.selected_area_id;
+                                            let title_clone = room.title.clone();
+                                            let res = self.rt.block_on(self.client.update_room_info(room.room_id, Some(&title_clone), area_id_opt));
+                                            match res {
+                                                Ok(Some(audit)) => {
+                                                    if audit.audit_title_status != 0 {
+                                                        ui.colored_label(egui::Color32::YELLOW, format!("标题审核状态: {} - {}", audit.audit_title_status, audit.audit_title_reason));
+                                                    } else {
+                                                        ui.colored_label(egui::Color32::GREEN, "更新成功");
+                                                    }
+                                                }
+                                                Ok(None) => { ui.colored_label(egui::Color32::GREEN, "更新成功"); }
+                                                Err(e) => { ui.colored_label(egui::Color32::RED, format!("更新失败: {}", e)); }
                                             }
                                         }
                                     });
                                     if area_fetch_failed {
                                         ui.colored_label(egui::Color32::RED, self.area_list_fetch_error.as_deref().unwrap_or(""));
                                     }
-                                });
-                                
-                                ui.add_space(10.0);
-                                
-                                if room.live_status == 1 && !self.push_addr.is_empty() {
-                                    ui.group(|ui| {
-                                        ui.heading("推流信息");
-                                        ui.add_space(5.0);
-                                        
-                                        ui.label("推流地址:");
-                                        ui.horizontal(|ui| {
-                                            ui.add(egui::TextEdit::singleline(&mut self.push_addr).desired_width(available_width * 0.7));
-                                            if ui.add_sized([80.0, 24.0], egui::Button::new("复制")).clicked() {
-                                                ctx.output_mut(|o| o.copied_text = self.push_addr.clone());
-                                            }
-                                        });
-                                        
-                                        ui.label("推流密钥:");
-                                        ui.horizontal(|ui| {
-                                            ui.add(egui::TextEdit::singleline(&mut self.push_key).desired_width(available_width * 0.7));
-                                            if ui.add_sized([80.0, 24.0], egui::Button::new("复制")).clicked() {
-                                                ctx.output_mut(|o| o.copied_text = self.push_key.clone());
-                                            }
-                                        });
-                                    });
-                                    ui.add_space(10.0);
                                 }
-                                
-                                if !self.area_list.is_empty() {
-                                    ui.group(|ui| {
-                                        ui.heading("分区设置");
-                                        ui.add_space(5.0);
-                                        
-                                        ui.horizontal(|ui| {
-                                            // parent combo
-                                            let parent_names: Vec<_> = self.area_list.iter().map(|p| p.name.as_str()).collect();
-                                            egui::ComboBox::from_label("父分区")
-                                                .width(200.0)
-                                                .selected_text(parent_names[self.selected_parent])
-                                                .show_ui(ui, |ui| {
-                                                    for (idx, p) in parent_names.iter().enumerate() {
-                                                        ui.selectable_value(&mut self.selected_parent, idx, *p);
-                                                    }
-                                                });
-                                                
-                                            ui.add_space(20.0);
-                                            
-                                            // ensure selected_child within bounds
-                                            if self.selected_parent >= self.area_list.len() { self.selected_parent = 0; }
-                                            let child_list = &self.area_list[self.selected_parent].children;
-                                            if child_list.is_empty() { return; }
-                                            if self.selected_child >= child_list.len() { self.selected_child = 0; }
-                                            let child_names: Vec<_> = child_list.iter().map(|c| c.name.as_str()).collect();
-                                            egui::ComboBox::from_label("子分区")
-                                                .width(200.0)
-                                                .selected_text(child_names[self.selected_child])
-                                                .show_ui(ui, |ui| {
-                                                    for (idx, c) in child_names.iter().enumerate() {
-                                                        ui.selectable_value(&mut self.selected_child, idx, *c);
-                                                    }
-                                                });
-                                            self.selected_area_id = Some(child_list[self.selected_child].id);
-                                        });
-                                    });
-                                    ui.add_space(10.0);
-                                }
-                                
-                                let area_fetch_failed = self.area_list_fetch_error.is_some();
-                                ui.add_enabled_ui(!area_fetch_failed, |ui|{
-                                    if ui.add_sized([200.0, 30.0], egui::Button::new("保存设置")).clicked() {
-                                        let area_id_opt = self.selected_area_id;
-                                        let title_clone = room.title.clone();
-                                        let res = self.rt.block_on(self.client.update_room_info(room.room_id, Some(&title_clone), area_id_opt));
-                                        match res {
-                                            Ok(Some(audit)) => {
-                                                if audit.audit_title_status != 0 {
-                                                    ui.colored_label(egui::Color32::YELLOW, format!("标题审核状态: {} - {}", audit.audit_title_status, audit.audit_title_reason));
-                                                } else {
-                                                    ui.colored_label(egui::Color32::GREEN, "更新成功");
-                                                }
-                                            }
-                                            Ok(None) => { ui.colored_label(egui::Color32::GREEN, "更新成功"); }
-                                            Err(e) => { ui.colored_label(egui::Color32::RED, format!("更新失败: {}", e)); }
-                                        }
+                            }
+                        }
+                        LoginState::NeedQrCode => {
+                            // 自动轮询扫码结果：每 2 秒检查一次
+                            if let Some(qr) = &self.qr_info {
+                                let should_poll = self.last_qr_poll.map_or(true, |t| t.elapsed() >= Duration::from_secs(2));
+                                if should_poll {
+                                    self.last_qr_poll = Some(Instant::now());
+                                    if let Ok(LoginState::LoggedIn) = self.rt.block_on(self.client.poll_qr_login(qr)) {
+                                        self.login_state = LoginState::LoggedIn;
+                                        self.qr_texture = None;
+                                        self.qr_info = None;
+                                        ctx.request_repaint();
+                                        println!("登录成功，状态已更新为LoggedIn");
                                     }
-                                });
-                                if area_fetch_failed {
-                                    ui.colored_label(egui::Color32::RED, self.area_list_fetch_error.as_deref().unwrap_or(""));
                                 }
                             }
-                        }
-                    }
-                    LoginState::NeedQrCode => {
-                        // 自动轮询扫码结果：每 2 秒检查一次
-                        if let Some(qr) = &self.qr_info {
-                            let should_poll = self.last_qr_poll.map_or(true, |t| t.elapsed() >= Duration::from_secs(2));
-                            if should_poll {
-                                self.last_qr_poll = Some(Instant::now());
-                                if let Ok(LoginState::LoggedIn) = self.rt.block_on(self.client.poll_qr_login(qr)) {
-                                    self.login_state = LoginState::LoggedIn;
-                                    self.qr_texture = None;
-                                    self.qr_info = None;
-                                    ctx.request_repaint();
-                                    println!("登录成功，状态已更新为LoggedIn");
-                                }
-                            }
-                        }
 
-                        ui.vertical_centered(|ui| {
-                            ui.heading("请扫码登录");
-                            ui.add_space(20.0);
-                            
-                            if self.qr_texture.is_none() {
-                                // 首次进入，获取二维码
-                                if let Ok(qr) = self.rt.block_on(self.client.fetch_qr_code()) {
-                                    self.qr_texture = Some(Self::load_qr_texture(&qr.url, ctx));
-                                    self.qr_info = Some(qr);
-                                }
-                            }
-                            
-                            if let Some(tex) = &self.qr_texture {
-                                ui.add_space(10.0);
-                                ui.image((tex.id(), tex.size_vec2()));
+                            ui.vertical_centered(|ui| {
+                                ui.heading("请扫码登录");
                                 ui.add_space(20.0);
-                            }
-                            
-                            if ui.add_sized([200.0, 30.0], egui::Button::new("手动检查扫码状态")).clicked() {
-                                if let Some(qr) = &self.qr_info {
-                                    match self.rt.block_on(self.client.poll_qr_login(qr)) {
-                                        Ok(LoginState::LoggedIn) => {
-                                            self.login_state = LoginState::LoggedIn;
-                                            self.qr_texture = None;
-                                            self.qr_info = None;
-                                            ctx.request_repaint();
-                                            println!("手动检查：登录成功，状态已更新为LoggedIn");
-                                        }
-                                        Ok(LoginState::NeedQrCode) => {
-                                            ui.colored_label(egui::Color32::YELLOW, "尚未扫码或已过期，请稍后重试/刷新。");
-                                        }
-                                        Err(e) => {
-                                            ui.colored_label(egui::Color32::RED, format!("登录失败: {}", e));
+                                
+                                if self.qr_texture.is_none() {
+                                    // 首次进入，获取二维码
+                                    if let Ok(qr) = self.rt.block_on(self.client.fetch_qr_code()) {
+                                        self.qr_texture = Some(Self::load_qr_texture(&qr.url, ctx));
+                                        self.qr_info = Some(qr);
+                                    }
+                                }
+                                
+                                if let Some(tex) = &self.qr_texture {
+                                    ui.add_space(10.0);
+                                    ui.image((tex.id(), tex.size_vec2()));
+                                    ui.add_space(20.0);
+                                }
+                                
+                                if ui.add_sized([200.0, 30.0], egui::Button::new("手动检查扫码状态")).clicked() {
+                                    if let Some(qr) = &self.qr_info {
+                                        match self.rt.block_on(self.client.poll_qr_login(qr)) {
+                                            Ok(LoginState::LoggedIn) => {
+                                                self.login_state = LoginState::LoggedIn;
+                                                self.qr_texture = None;
+                                                self.qr_info = None;
+                                                ctx.request_repaint();
+                                                println!("手动检查：登录成功，状态已更新为LoggedIn");
+                                            }
+                                            Ok(LoginState::NeedQrCode) => {
+                                                ui.colored_label(egui::Color32::YELLOW, "尚未扫码或已过期，请稍后重试/刷新。");
+                                            }
+                                            Err(e) => {
+                                                ui.colored_label(egui::Color32::RED, format!("登录失败: {}", e));
+                                            }
                                         }
                                     }
                                 }
-                            }
-                        });
+                            });
+                        }
                     }
-                }
+
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(format!("v{}", self.version));
+                        ui.add_space(10.0);
+                        ui.hyperlink_to("源代码", "https://github.com/zmhu/bili-live-tool");
+                    });
+                });
             });
         });
+    }
+}
+
+fn load_icon() -> egui::viewport::IconData {
+    let (icon_rgba, icon_width, icon_height) = {
+        let image = image::load_from_memory(include_bytes!("../assets/icon.png"))
+            .expect("Failed to open icon path")
+            .into_rgba8();
+        let (width, height) = image.dimensions();
+        let rgba = image.into_raw();
+        (rgba, width, height)
+    };
+
+    egui::viewport::IconData {
+        rgba: icon_rgba,
+        width: icon_width,
+        height: icon_height,
     }
 }
 
 fn main() -> Result<()> {
     let mut native_options = eframe::NativeOptions::default();
     native_options.viewport.inner_size = Some(egui::vec2(800.0, 600.0));
+    native_options.viewport.icon = Some(Arc::new(load_icon()));
     
     // 使用默认渲染器
     // native_options.renderer = eframe::Renderer::Glow;
@@ -443,10 +474,10 @@ fn main() -> Result<()> {
             // 2. Set style
             let mut style = (*cc.egui_ctx.style()).clone();
             style.text_styles = [
-                (egui::TextStyle::Heading, egui::FontId::proportional(24.0)),
-                (egui::TextStyle::Body, egui::FontId::proportional(18.0)),
-                (egui::TextStyle::Monospace, egui::FontId::monospace(16.0)),
-                (egui::TextStyle::Button, egui::FontId::proportional(16.0)),
+                (egui::TextStyle::Heading, egui::FontId::proportional(22.0)),
+                (egui::TextStyle::Body, egui::FontId::proportional(16.0)),
+                (egui::TextStyle::Monospace, egui::FontId::monospace(14.0)),
+                (egui::TextStyle::Button, egui::FontId::proportional(15.0)),
                 (egui::TextStyle::Small, egui::FontId::proportional(12.0)),
             ].into();
             
